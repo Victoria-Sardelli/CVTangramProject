@@ -1,4 +1,4 @@
-function houghtrans =  imfindshapes(varargin)
+function [houghtrans, rotRange, sizeRange, flipRange] =  imfindshapes(varargin)
 % IMFINDSHAPES Uses hough transform to find shapes in an image
 % houghtrans = imfindsquares(I,s) Returns voting space for squares of
 % size s rotated from 0 to 90 degrees.
@@ -18,8 +18,16 @@ shapeTP = parsedInputs.ShapeTemplate;
 edgeThresh = parsedInputs.EdgeThreshold;
 
     %% Rotate shape template 180 degrees round origin
-    %shapeM = rotz(180) * shapeTP;
+    %% ACTUALLY UNEEDED
+    % Assuming the origin of the shape defined in the given points is
+    % (0,0), inverting the points will find the value of
+    % (x_c - x_{ij}, y_c - y_{ij}) that will be used when shifting points
     shapeM = -1 * shapeTP;
+    shapeTP = shapeM;
+    
+    %% Get gradient values/direction at shape points
+    % Plus 18 and mod 360 to keep values positive and in range [0,359]
+    shapeGDir = mod(atan2d(shapeTP(1,:), shapeTP(2,:)) + 180, 360);
     
     %% Get max width of shape for padding and angles of edges...?
     % acosd
@@ -47,6 +55,12 @@ edgeThresh = parsedInputs.EdgeThreshold;
         I = rgb2gray(I);
     end
     [Iheight, Iwidth] = size(I);
+    
+    %% Get image gradient, and pad with zeros
+    [Igx, Igy] = imgradientxy(I, 'sobel');
+    %Ig = mod(atan2d(Igx,Igy) + 180, 360);
+    Ig = atand(Igy./Igx);
+    IgPadded = padarray(Ig, [imPadding imPadding], NaN, 'post');
 
     %% Get image edges, and pad with zeros
     Iedges = edge(I,'sobel');
@@ -61,28 +75,77 @@ edgeThresh = parsedInputs.EdgeThreshold;
     end
     if (length(rotRange) == 2)
         rotRange = min(rotRange):rotInc:max(rotRange);
+        %possRot = unique(bsxfun(@minus,unique(Ig),shapeG))
+    end
+    if flip
+        flipRange = [ 0 1 ];
+    else
+        flipRange = [ 0 ];
     end
     
     %% Create voting space and vote
     %houghtrans = zeros(size(Iedges,1), size(Iedges,2),...
     %    length(sizeRange), length(rotRange));
     houghtrans = zeros(Iheight, Iwidth,...
-        length(rotRange), length(sizeRange));
+        length(rotRange), length(sizeRange), length(flipRange));
     for si = [1:length(sizeRange)]
         s = sizeRange(si);
         for ri = [1:length(rotRange)]
             r = rotRange(ri);
-            tShapeM = s * rotz(r) * shapeTP;
-            tShapeM(3,:) = []; % Get rid of z-coordinates
-            for p = tShapeM % Loop over points
-                IedgesShift = circshift(IedgesPadded, round(p));
-                % There is probably a more accurate option than rounding p
-                IedgesShift = IedgesShift(1:Iheight, 1:Iwidth);
-                %f = figure, subplot(2,1,1), imshow(Iedges),
-                %subplot(2,1,2), imshow(IedgesShift);
-                %close(f);
-                houghtrans(:, :, ri, si) = houghtrans(:, :, ri, si) + IedgesShift;
+            for f = flipRange
+                % Create shape transformation matrix
+                tM = rotz(r) * diag([s*(-1)^f s s]);
+                % Transform shape
+                tShapeM = tM * shapeTP;
+                % Get gradient directions for transformed shape
+                %tShapeGDir = mod(abs((360*f) - shapeGDir) + r, 360);
+                tShapeGDir = atand(tShapeM(2,:)./tShapeM(1,:)); % For now
+                %tShapeGDir = mod(shapeGDir + r, 360);
+                
+                %spSz = ceil(sqrt(size(tShapeM,2)));
+                %figure;
+                
+                vsG = zeros(size(IgPadded));
+                vsE = zeros(size(IedgesPadded));
+                for pi = [1:size(tShapeM,2)] % Loop over points
+                    p = round(tShapeM(1:2,pi)); % Probably a more accurate option than rounding p
+                    p = flipud(p); % Have to flip x and y for circle shift
+                    %p(1) = -p(1); % Invert y because of image axis
+                    pGDir = tShapeGDir(pi);
+                    vsG = vsG + circshift(mod((IgPadded + 90) - (pGDir + 90),180) <= 1, p);
+                    %votingSpace = circshift(IgPadded == pGDir, p);
+%                     vsEtemp = circshift(IedgesPadded, p);
+%                     h = subplot(spSz, spSz, pi);
+%                     imshow(cat(3, Iedges, zeros(size(I)), zeros(size(I))));
+%                     hold on;
+%                     i = imagesc(vsEtemp(1:Iheight, 1:Iwidth));
+%                     i.AlphaData = 0.5;
+%                     plotshape(shapeTP,[Iwidth/2, Iheight/2],s,r,'Axis',h);
+%                    vsE = vsE +vsEtemp;
+                    vsE = vsE + circshift(IedgesPadded, p);
+                end
+%                 figure;
+%                 imshow(cat(3, Iedges, zeros(size(I)), zeros(size(I))));
+%                 hold on;
+                i = imagesc(vsE(1:Iheight, 1:Iwidth));
+                i.AlphaData = 0.5;
+                    
+                votingSpace = vsG + vsE;
+                votingSpace = votingSpace(1:Iheight, 1:Iwidth);
+                houghtrans(:, :, ri, si, f+1) = votingSpace;
             end
+            
+%             tShapeM(3,:) = []; % Get rid of z-coordinates
+%             for p = tShapeM % Loop over points
+%                 IedgesShift = circshift(IedgesPadded, round(p));
+%                 % There is probably a more accurate option than rounding p
+%                 IedgesShift = IedgesShift(1:Iheight, 1:Iwidth);
+%                 %f = figure, subplot(2,1,1), imshow(Iedges),
+%                 %subplot(2,1,2), imshow(IedgesShift);
+%                 %close(f);
+%                 houghtrans(:, :, ri, si) = houghtrans(:, :, ri, si) + IedgesShift;
+%             end
+
             % smooth voting space
             %h = fspecial('gaussian',floor(s / 2),2);
             %houghtrans(:, :, ri, si) = imfilter(houghtrans(:, :, ri, si), h);
@@ -193,7 +256,7 @@ validateShapeTP();
     end
 
     function tf = checkFlip(flip)
-        validateattributes(flip,{'logical'});
+        validateattributes(flip,{'logical', 'numeric'}, {'<=', 1});
         tf = true;
     end
 
